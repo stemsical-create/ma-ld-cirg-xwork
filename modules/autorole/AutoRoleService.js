@@ -1,16 +1,19 @@
 /**
  * ER:LC Auto-Role Service
- * Polls ER:LC API, checks player teams, syncs Discord roles
+ * 1. Scans members for Bloxlink/Melonly verification via nickname patterns
+ * 2. Polls ER:LC API for each player's team
+ * 3. Assigns/removes Discord roles automatically
  */
-const { REST } = require('discord.js');
 const axios = require('axios');
 const { query } = require('../../database/db');
+const VerificationScanner = require('./VerificationScanner');
 
 class AutoRoleService {
   constructor(client) {
     this.client = client;
     this.interval = null;
-    this.pollInterval = 30000; // 30 seconds default
+    this.pollInterval = 30000; // 30 seconds
+    this._scanning = false;
   }
 
   get apiBase() {
@@ -18,12 +21,14 @@ class AutoRoleService {
   }
 
   get headers() {
-    return { 'Authorization': `Bearer ${process.env.API_KEY}`, 'Content-Type': 'application/json' };
+    return {
+      'Authorization': `Bearer ${process.env.API_KEY}`,
+      'Content-Type': 'application/json',
+    };
   }
 
   async start() {
     console.log('[AutoRole] Service started');
-    // Run immediately, then every 30s
     await this.syncAllGuilds();
     this.interval = setInterval(() => this.syncAllGuilds(), this.pollInterval);
   }
@@ -37,19 +42,30 @@ class AutoRoleService {
   }
 
   async syncAllGuilds() {
+    if (this._scanning) return; // prevent overlap
+    this._scanning = true;
+
     try {
       const result = await query('SELECT * FROM autorole_config WHERE enabled = true');
       for (const config of result.rows) {
-        await this.syncGuild(config);
+        try {
+          await this.syncGuild(config);
+        } catch (err) {
+          console.error(`[AutoRole] Guild ${config.guild_id} error:`, err.message);
+        }
       }
     } catch (err) {
       console.error('[AutoRole] Sync error:', err.message);
+    } finally {
+      this._scanning = false;
     }
   }
 
   async syncGuild(config) {
     const guild = this.client.guilds.cache.get(config.guild_id);
     if (!guild) return;
+
+    await guild.members.fetch();
 
     // Get mappings
     const mappingsResult = await query(
@@ -58,39 +74,64 @@ class AutoRoleService {
     );
     const mappings = mappingsResult.rows;
 
-    // Get linked players
+    if (mappings.length === 0) return; // no mappings = nothing to do
+
+    // ===== VERIFICATION SCAN =====
+    // Auto-detect verified members via Bloxlink/Melonly nickname patterns
+    // No /link command needed — reads existing verification data
+    const newlyFound = await VerificationScanner.scanGuild(guild);
+    if (newlyFound > 0) {
+      console.log(`[AutoRole] Found ${newlyFound} new verified members via nickname scan`);
+    }
+
+    // Get all verified players for this guild
     const playersResult = await query(
-      'SELECT * FROM autorole_players WHERE guild_id = $1',
+      'SELECT * FROM autorole_players WHERE guild_id = $1 AND verified = true AND roblox_id IS NOT NULL',
       [config.guild_id]
     );
 
-    // Fetch online players from ER:LC
+    if (playersResult.rows.length === 0) return; // no verified players to check
+
+    // ===== FETCH ER:LC ONLINE PLAYERS =====
     let onlinePlayers = [];
     try {
-      const res = await axios.get(`${this.apiBase}/server/${process.env.ERLC_SERVER_ID || ''}/players`, {
-        headers: this.headers,
-        timeout: 10000,
-      });
-      onlinePlayers = res.data?.Players || [];
+      const res = await axios.get(
+        `${this.apiBase}/server/${process.env.ERLC_SERVER_ID || ''}/joinlog`,
+        { headers: this.headers, timeout: 10000 }
+      );
+      // joinlog gives recent join data with Team info
+      onlinePlayers = res.data || [];
     } catch (err) {
-      console.error('[AutoRole] API fetch error:', err.message);
-      return;
+      // Try the players endpoint instead
+      try {
+        const res = await axios.get(
+          `${this.apiBase}/server/${process.env.ERLC_SERVER_ID || ''}/players`,
+          { headers: this.headers, timeout: 10000 }
+        );
+        onlinePlayers = res.data?.Players || [];
+      } catch (err2) {
+        console.error('[AutoRole] ER:LC API error:', err2.message);
+        return;
+      }
     }
 
-    // For each linked player in this guild, check their ER:LC team
-    for (const player of playersResult.rows) {
-      const onlineData = onlinePlayers.find(p => String(p.robloxId || p.id) === String(player.roblox_id));
-      const currentTeam = onlineData?.Team || null;
+    // Build a lookup map: robloxId -> team
+    const teamMap = {};
+    for (const p of onlinePlayers) {
+      const id = p.robloxId || p.id || p.RobloxId;
+      if (id) {
+        const teamName = AutoRoleService.getTeamName(p.Team || p.team);
+        if (teamName) teamMap[String(id)] = teamName;
+      }
+    }
 
-      // Get previous team
+    // ===== SYNC ROLES FOR EACH VERIFIED PLAYER =====
+    for (const player of playersResult.rows) {
+      const currentTeam = teamMap[player.roblox_id] || null;
       const prevTeam = player.team_name;
 
-      if (currentTeam === prevTeam) continue; // No change
+      if (currentTeam === prevTeam) continue; // no change
 
-      // Find the member in Discord
-      try {
-        await guild.members.fetch();
-      } catch { continue; }
       const member = guild.members.cache.get(player.user_id);
       if (!member) continue;
 
@@ -98,9 +139,9 @@ class AutoRoleService {
       if (prevTeam) {
         const oldMapping = mappings.find(m => m.team_name.toLowerCase() === prevTeam.toLowerCase());
         if (oldMapping) {
-          const oldRole = guild.roles.cache.get(oldMapping.role_id);
-          if (oldRole && member.roles.cache.has(oldRole.id)) {
-            await member.roles.remove(oldRole, 'AutoRole: Left team');
+          const role = guild.roles.cache.get(oldMapping.role_id);
+          if (role && member.roles.cache.has(role.id)) {
+            await member.roles.remove(role, 'AutoRole: Left team').catch(() => {});
           }
         }
       }
@@ -109,9 +150,9 @@ class AutoRoleService {
       if (currentTeam) {
         const newMapping = mappings.find(m => m.team_name.toLowerCase() === currentTeam.toLowerCase());
         if (newMapping) {
-          const newRole = guild.roles.cache.get(newMapping.role_id);
-          if (newRole && !member.roles.cache.has(newRole.id)) {
-            await member.roles.add(newRole, 'AutoRole: Team sync');
+          const role = guild.roles.cache.get(newMapping.role_id);
+          if (role && !member.roles.cache.has(role.id)) {
+            await member.roles.add(role, 'AutoRole: Team sync').catch(() => {});
           }
         }
       }
@@ -128,36 +169,30 @@ class AutoRoleService {
       'UPDATE autorole_config SET last_checked = NOW() WHERE guild_id = $1',
       [config.guild_id]
     );
-
-    // Log to channel if configured
-    if (config.join_log_channel) {
-      const chan = guild.channels.cache.get(config.join_log_channel);
-      if (chan) {
-        // optional periodic log
-      }
-    }
   }
 
-  // Get team display name
+  /**
+   * Map ER:LC team value to readable name
+   */
   static getTeamName(team) {
-    if (!team || team === 0 || team === '') return null;
-    const teamNames = {
-      '1': 'Police',
-      '2': 'Sheriff',
-      '3': 'State Police',
-      '4': 'Fire/EMS',
-      '5': 'DOT',
-      '6': 'Civilian',
+    if (!team || team === 0 || team === '0') return null;
+    const t = String(team).trim();
+    const map = {
+      '1': 'Civilian',
+      '2': 'Police',
+      '3': 'Sheriff',
+      '4': 'State Police',
+      '5': 'Fire/EMS',
+      '6': 'DOT',
+      civilian: 'Civilian',
       police: 'Police',
       sheriff: 'Sheriff',
       statepolice: 'State Police',
       fire: 'Fire/EMS',
       ems: 'Fire/EMS',
       dot: 'DOT',
-      civilian: 'Civilian',
     };
-    const key = String(team).toLowerCase().replace(/\s+/g, '');
-    return teamNames[key] || String(team);
+    return map[t.toLowerCase()] || t;
   }
 }
 
