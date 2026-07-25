@@ -1,7 +1,7 @@
 /**
  * Auto-Role Config Panel
- * Server Owner configures team -> role mappings via panels
- * No manual /link command — verification is auto-scraped from Bloxlink/Melonly
+ * Admin+ can configure team -> role mappings via interactive panels
+ * No manual /link — verification auto-scraped from Bloxlink/Melonly nicknames
  */
 const { EmbedBuilder, ActionRowBuilder, StringSelectMenuBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const { query } = require('../database/db');
@@ -13,14 +13,15 @@ module.exports = {
     await interaction.deferReply({ ephemeral: false });
     const guildId = interaction.guild.id;
 
-
+    // Check: Admin+ OR authorized roles
+    if (!interaction.member.permissions.has('Administrator')) {
       const access = await query(
         'SELECT role_id FROM autorole_access WHERE guild_id = $1 AND permission = $2',
         [guildId, 'manage']
       );
       const granted = access.rows.some(r => interaction.member.roles.cache.has(r.role_id));
       if (!granted) {
-        return interaction.editReply({ content: '❌ Only the Server Owner or configured roles can manage auto-role.', ephemeral: true });
+        return interaction.editReply({ content: '❌ Admin+ permission required to manage auto-role.', ephemeral: true });
       }
     }
 
@@ -48,7 +49,6 @@ async function showPanel(interaction, guildId) {
       { name: 'Last Checked', value: cfg.last_checked ? `<t:${Math.floor(new Date(cfg.last_checked).getTime() / 1000)}:R>` : 'Never', inline: true },
     );
 
-  // Team mappings
   const defaultTeams = ['Civilian', 'Police', 'Sheriff', 'State Police', 'Fire/EMS', 'DOT'];
   let mapText = '';
   for (const team of defaultTeams) {
@@ -59,14 +59,12 @@ async function showPanel(interaction, guildId) {
   embed.addFields({ name: 'Team Mappings', value: mapText || 'None', inline: false });
 
   if (accessRoles.length > 0) {
-    const list = accessRoles.map(a => `<@&${a.role_id}>`).join(', ');
-    embed.addFields({ name: 'Roles with Access', value: list, inline: false });
+    embed.addFields({ name: 'Roles with Access', value: accessRoles.map(a => `<@&${a.role_id}>`).join(', '), inline: false });
   }
 
-  // Verification auto-scan info (no /link needed)
   embed.addFields({
     name: '🔍 Verification',
-    value: 'Roblox IDs are auto-detected from **Bloxlink** and **Melonly** nickname patterns. No manual `/link` command — just verify with those bots and auto-role will pick it up.',
+    value: 'Roblox IDs auto-detected from **Bloxlink/Melonly** nicknames. No manual link needed.',
     inline: false,
   });
 
@@ -81,9 +79,7 @@ async function showPanel(interaction, guildId) {
     new StringSelectMenuBuilder()
       .setCustomId('ar_team_select')
       .setPlaceholder('Select team to map...')
-      .addOptions(
-        defaultTeams.map(t => ({ label: t, value: t })),
-      ),
+      .addOptions(defaultTeams.map(t => ({ label: t, value: t }))),
   );
 
   const row3 = new ActionRowBuilder().addComponents(
@@ -94,7 +90,6 @@ async function showPanel(interaction, guildId) {
 
   const msg = await interaction.editReply({ embeds: [embed], components: [row1, row2, row3], fetchReply: true });
 
-  // Collector
   const filter = i => i.user.id === interaction.user.id;
   const collector = msg.createMessageComponentCollector({ filter, time: 120000 });
 
@@ -109,55 +104,29 @@ async function showPanel(interaction, guildId) {
       cfg.enabled = newVal;
       await i.update({ content: `✅ Auto-role ${newVal ? 'enabled' : 'disabled'}.`, embeds: [], components: [], ephemeral: true });
       setTimeout(() => showPanel(interaction, guildId), 500);
-    }
-
-    else if (i.customId === 'ar_team_select') {
+    } else if (i.customId === 'ar_team_select') {
       const team = i.values[0];
       const { ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder: ModalRow } = require('discord.js');
-      const modal = new ModalBuilder()
-        .setCustomId(`ar_role_${team}`)
-        .setTitle(`Role for ${team}`);
-      modal.addComponents(
-        new ModalRow().addComponents(
-          new TextInputBuilder()
-            .setCustomId('role_id')
-            .setLabel('Enter Role ID')
-            .setStyle(TextInputStyle.Short)
-            .setPlaceholder('Paste the role ID')
-            .setRequired(true),
-        ),
-      );
+      const modal = new ModalBuilder().setCustomId(`ar_role_${team}`).setTitle(`Role for ${team}`);
+      modal.addComponents(new ModalRow().addComponents(
+        new TextInputBuilder().setCustomId('role_id').setLabel('Enter Role ID').setStyle(TextInputStyle.Short).setPlaceholder('Paste role ID').setRequired(true),
+      ));
       await i.showModal(modal);
-    }
-
-    else if (i.customId === 'ar_set_log') {
+    } else if (i.customId === 'ar_set_log') {
       const { ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder: ModalRow } = require('discord.js');
-      const modal = new ModalBuilder()
-        .setCustomId('ar_log_modal')
-        .setTitle('Log Channel');
-      modal.addComponents(
-        new ModalRow().addComponents(
-          new TextInputBuilder()
-            .setCustomId('channel_id')
-            .setLabel('Channel ID (leave blank to clear)')
-            .setStyle(TextInputStyle.Short)
-            .setPlaceholder('Channel ID')
-            .setRequired(false),
-        ),
-      );
+      const modal = new ModalBuilder().setCustomId('ar_log_modal').setTitle('Log Channel');
+      modal.addComponents(new ModalRow().addComponents(
+        new TextInputBuilder().setCustomId('channel_id').setLabel('Channel ID (blank to clear)').setStyle(TextInputStyle.Short).setPlaceholder('Channel ID').setRequired(false),
+      ));
       await i.showModal(modal);
-    }
-
-    else if (i.customId === 'ar_access') {
+    } else if (i.customId === 'ar_access') {
       await showAccessPanel(i, guildId);
-    }
-
-    else if (i.customId === 'ar_sync') {
+    } else if (i.customId === 'ar_sync') {
       await i.update({ content: '🔄 Syncing...', embeds: [], components: [], ephemeral: true });
       const AutoRoleService = require('../modules/autorole/AutoRoleService');
       const svc = new AutoRoleService(interaction.client);
       await svc.syncGuild({ guild_id: guildId, enabled: true, log_channel: cfg.log_channel });
-      await interaction.editReply({ content: '✅ Sync done. Roles updated for verified members.', ephemeral: true });
+      await interaction.editReply({ content: '✅ Sync done.', ephemeral: true });
       setTimeout(() => showPanel(interaction, guildId), 1000);
     }
   });
@@ -169,18 +138,14 @@ async function showAccessPanel(interaction, guildId) {
 
   const embed = new EmbedBuilder()
     .setTitle('🔑 Access Management')
-    .setDescription('Choose which Discord roles can access the `/autorole` panel.\nOnly selected roles + Server Owner.')
+    .setDescription('Choose which Discord roles can use `/autorole`.\nAdmin+ always has access.')
     .setColor(0x5865F2)
-    .addFields({ name: 'Authorized Roles', value: current.map(r => `<@&${r.role_id}>`).join('\n') || 'None (Owner only)' });
+    .addFields({ name: 'Authorized Roles', value: current.map(r => `<@&${r.role_id}>`).join('\n') || 'None (Admin+ only)' });
 
-  const roleOpts = interaction.guild.roles.cache
-    .filter(r => r.id !== interaction.guild.id && !r.managed)
-    .map(r => ({ label: r.name, value: r.id }));
+  const roleOpts = interaction.guild.roles.cache.filter(r => r.id !== interaction.guild.id && !r.managed).map(r => ({ label: r.name, value: r.id }));
 
   const addMenu = new ActionRowBuilder().addComponents(
-    new StringSelectMenuBuilder()
-      .setCustomId('ar_add_access')
-      .setPlaceholder('Add a role...')
+    new StringSelectMenuBuilder().setCustomId('ar_add_access').setPlaceholder('Add a role...')
       .addOptions(roleOpts.slice(0, 25).length > 0 ? roleOpts.slice(0, 25) : [{ label: 'No roles', value: 'none' }]),
   );
 
@@ -189,9 +154,7 @@ async function showAccessPanel(interaction, guildId) {
     return { label: role?.name || 'Unknown', value: r.role_id };
   });
   const removeMenu = new ActionRowBuilder().addComponents(
-    new StringSelectMenuBuilder()
-      .setCustomId('ar_remove_access')
-      .setPlaceholder('Remove a role...')
+    new StringSelectMenuBuilder().setCustomId('ar_remove_access').setPlaceholder('Remove a role...')
       .addOptions(removeOpts.length > 0 ? removeOpts : [{ label: 'No roles', value: 'none' }]),
   );
 
@@ -202,7 +165,6 @@ async function showAccessPanel(interaction, guildId) {
   await interaction.update({ embeds: [embed], components: [addMenu, removeMenu, back] });
 }
 
-// Handle modals and access sub-menu actions
 module.exports.handleModal = async (interaction) => {
   const guildId = interaction.guild.id;
   const cid = interaction.customId;
@@ -219,38 +181,28 @@ module.exports.handleModal = async (interaction) => {
       [guildId, team, roleId]
     );
     await interaction.reply({ content: `✅ **${team}** → <@&${roleId}>`, ephemeral: true });
-  }
-
-  else if (cid === 'ar_log_modal') {
+  } else if (cid === 'ar_log_modal') {
     const ch = interaction.fields.getTextInputValue('channel_id').replace(/[<#>]/g, '');
     await query(
       `INSERT INTO autorole_config (guild_id, log_channel) VALUES ($1, $2)
        ON CONFLICT (guild_id) DO UPDATE SET log_channel = $2, updated_at = NOW()`,
       [guildId, ch || null]
     );
-    await interaction.reply({ content: ch ? `✅ Log channel set.` : '✅ Log channel cleared.', ephemeral: true });
-  }
-
-  else if (cid === 'ar_add_access') {
+    await interaction.reply({ content: ch ? '✅ Log channel set.' : '✅ Log channel cleared.', ephemeral: true });
+  } else if (cid === 'ar_add_access') {
     const roleId = interaction.values?.[0];
     if (roleId && roleId !== 'none') {
       await query(
-        `INSERT INTO autorole_access (guild_id, role_id, permission) VALUES ($1, $2, 'manage')
-         ON CONFLICT DO NOTHING`,
+        `INSERT INTO autorole_access (guild_id, role_id, permission) VALUES ($1, $2, 'manage') ON CONFLICT DO NOTHING`,
         [guildId, roleId]
       );
       await interaction.reply({ content: `✅ <@&${roleId}> can now manage auto-role.`, ephemeral: true });
     }
-  }
-
-  else if (cid === 'ar_remove_access') {
+  } else if (cid === 'ar_remove_access') {
     const roleId = interaction.values?.[0];
     if (roleId && roleId !== 'none') {
-      await query(
-        'DELETE FROM autorole_access WHERE guild_id = $1 AND role_id = $2',
-        [guildId, roleId]
-      );
-      await interaction.reply({ content: `✅ Role removed from access list.`, ephemeral: true });
+      await query('DELETE FROM autorole_access WHERE guild_id = $1 AND role_id = $2', [guildId, roleId]);
+      await interaction.reply({ content: '✅ Role removed from access list.', ephemeral: true });
     }
   }
 };
