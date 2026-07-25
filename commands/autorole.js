@@ -13,8 +13,7 @@ module.exports = {
     await interaction.deferReply({ ephemeral: false });
     const guildId = interaction.guild.id;
 
-    // Check permission: Owner OR authorized roles
-    if (interaction.user.id !== interaction.guild.ownerId) {
+
       const access = await query(
         'SELECT role_id FROM autorole_access WHERE guild_id = $1 AND permission = $2',
         [guildId, 'manage']
