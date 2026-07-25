@@ -1,7 +1,7 @@
 {
   "name": "mdcrx-bot",
   "version": "1.0.0",
-  "description": "Modern Colorado Roleplay Discord Bot",
+  "description": "Modern Colorado Roleplay Discord Bot — ER:LC Auto-Role",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
