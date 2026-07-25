@@ -1,6 +1,3 @@
-/**
- * PostgreSQL Database Connection & Init
- */
 const { Pool } = require('pg');
 
 let pool = null;
@@ -14,10 +11,7 @@ function getPool() {
       idleTimeoutMillis: 30000,
       connectionTimeoutMillis: 5000,
     });
-
-    pool.on('error', (err) => {
-      console.error('[DB] Pool error:', err.message);
-    });
+    pool.on('error', err => console.error('[DB] Pool error:', err.message));
   }
   return pool;
 }
@@ -39,9 +33,8 @@ async function initDatabase() {
     CREATE TABLE IF NOT EXISTS autorole_config (
       guild_id VARCHAR(255) PRIMARY KEY,
       enabled BOOLEAN DEFAULT false,
-      join_log_channel VARCHAR(255),
+      log_channel VARCHAR(255),
       last_checked TIMESTAMPTZ,
-      created_at TIMESTAMPTZ DEFAULT NOW(),
       updated_at TIMESTAMPTZ DEFAULT NOW()
     );
   `);
@@ -60,8 +53,9 @@ async function initDatabase() {
       id SERIAL PRIMARY KEY,
       guild_id VARCHAR(255) NOT NULL,
       user_id VARCHAR(255) NOT NULL,
-      roblox_id VARCHAR(255) NOT NULL,
+      roblox_id VARCHAR(255),
       team_name VARCHAR(100),
+      verified BOOLEAN DEFAULT false,
       last_updated TIMESTAMPTZ DEFAULT NOW(),
       UNIQUE(guild_id, user_id)
     );
@@ -72,7 +66,6 @@ async function initDatabase() {
       guild_id VARCHAR(255) NOT NULL,
       role_id VARCHAR(255) NOT NULL,
       permission VARCHAR(50) NOT NULL DEFAULT 'manage',
-      created_at TIMESTAMPTZ DEFAULT NOW(),
       UNIQUE(guild_id, role_id, permission)
     );
   `);
