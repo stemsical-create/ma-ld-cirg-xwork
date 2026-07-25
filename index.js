@@ -9,43 +9,44 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
-  ]
+    GatewayIntentBits.MessageContent,
+  ],
 });
 
 client.commands = new Collection();
 let dbReady = false;
 
 client.once('ready', async () => {
-  console.log(`✅ ${client.user.tag} is online!`);
+  console.log(`✅ ${client.user.tag} online`);
   client.user.setActivity('Modern Colorado | dsc.gg/MDCRX', { type: 'PLAYING' });
 
-  // Init database
+  // Database
   if (process.env.DATABASE_URL) {
     try {
       await initDatabase();
       dbReady = true;
       console.log('✅ PostgreSQL initialized');
     } catch (err) {
-      console.error('❌ DB init:', err.message);
+      console.error('❌ DB:', err.message);
     }
   }
 
-  // Load slash commands
-  const commandsPath = path.join(__dirname, 'commands');
-  const files = fs.readdirSync(commandsPath).filter(f => f.endsWith('.js'));
-  for (const file of files) {
-    const cmd = require(`./commands/${file}`);
+  // Load commands
+  const cmdDir = path.join(__dirname, 'commands');
+  fs.readdirSync(cmdDir).filter(f => f.endsWith('.js')).forEach(f => {
+    const cmd = require(`./commands/${f}`);
     if (cmd.name) client.commands.set(cmd.name, cmd);
-  }
-  console.log(`✅ Loaded ${client.commands.size} commands`);
+  });
+  console.log(`✅ ${client.commands.size} commands loaded`);
 
   // Deploy slash commands
   if (process.env.GUILD_ID) {
     try {
       const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN);
       const cmds = Array.from(client.commands.values()).map(c => ({
-        name: c.name, description: c.description || 'No description', options: c.options || [],
+        name: c.name,
+        description: c.description || '_',
+        options: c.options || [],
       }));
       await rest.put(Routes.applicationGuildCommands(client.user.id, process.env.GUILD_ID), { body: cmds });
       console.log('✅ Slash commands deployed');
@@ -54,7 +55,7 @@ client.once('ready', async () => {
     }
   }
 
-  // Start auto-role service
+  // Start auto-role
   if (dbReady) {
     try {
       const AutoRoleService = require('./modules/autorole/AutoRoleService');
@@ -66,33 +67,37 @@ client.once('ready', async () => {
 });
 
 // Interaction handler
-client.on('interactionCreate', async (interaction) => {
+client.on('interactionCreate', async (i) => {
   try {
-    if (interaction.isChatInputCommand()) {
-      const cmd = client.commands.get(interaction.commandName);
-      if (cmd) await cmd.execute(interaction);
+    if (i.isChatInputCommand()) {
+      const cmd = client.commands.get(i.commandName);
+      if (cmd) await cmd.execute(i);
     }
-    if (interaction.isModalSubmit() && interaction.customId.startsWith('autorole_')) {
+    if (i.isModalSubmit() && i.customId.startsWith('ar_')) {
       const { handleModal } = require('./commands/autorole');
-      await handleModal(interaction);
+      await handleModal(i);
+    }
+    if (i.isStringSelectMenu()) {
+      const ids = ['ar_add_access', 'ar_remove_access'];
+      if (ids.includes(i.customId)) {
+        const { handleModal } = require('./commands/autorole');
+        await handleModal(i);
+      }
     }
   } catch (err) {
-    console.error('Interaction error:', err);
-    if (!interaction.replied) {
-      interaction.reply({ content: '❌ Error', ephemeral: true }).catch(() => {});
-    }
+    console.error('Error:', err);
+    if (!i.replied) i.reply({ content: '❌ Error', ephemeral: true }).catch(() => {});
   }
 });
 
 // Prefix commands
-client.on('messageCreate', async (message) => {
-  if (message.author.bot) return;
-  if (message.content.toLowerCase() === 'apply') {
-    await message.reply('**Applications**: https://forms.gle/yourform | Check pins.\n<@&1486887218072125533>');
-    return;
+client.on('messageCreate', async (msg) => {
+  if (msg.author.bot) return;
+  if (msg.content.toLowerCase() === 'apply') {
+    await msg.reply('**Applications**: https://forms.gle/yourform | Check pins.\n<@&1486887218072125533>');
   }
-  if (message.content === '!ping') {
-    await message.reply(`Pong! ${client.ws.ping}ms`);
+  if (msg.content === '!ping') {
+    await msg.reply(`Pong! ${client.ws.ping}ms`);
   }
 });
 
