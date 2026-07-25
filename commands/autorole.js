@@ -1,8 +1,9 @@
 /**
- * Auto-Role Management Panel
- * Server Owner / Admins configure ER:LC team -> Discord role mappings
+ * Auto-Role Config Panel
+ * Server Owner configures team -> role mappings via panels
+ * No manual /link command — verification is auto-scraped from Bloxlink/Melonly
  */
-const { EmbedBuilder, ActionRowBuilder, StringSelectMenuBuilder, ButtonBuilder, ButtonStyle, ComponentType } = require('discord.js');
+const { EmbedBuilder, ActionRowBuilder, StringSelectMenuBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const { query } = require('../database/db');
 
 module.exports = {
@@ -10,258 +11,247 @@ module.exports = {
   description: 'Configure ER:LC auto-role system',
   async execute(interaction) {
     await interaction.deferReply({ ephemeral: false });
-
     const guildId = interaction.guild.id;
 
-    // Check permission: Server Owner OR role-based access
+    // Check permission: Owner OR authorized roles
     if (interaction.user.id !== interaction.guild.ownerId) {
-      const accessRows = await query(
+      const access = await query(
         'SELECT role_id FROM autorole_access WHERE guild_id = $1 AND permission = $2',
         [guildId, 'manage']
       );
-      const hasAccess = accessRows.rows.some(r => interaction.member.roles.cache.has(r.role_id));
-      if (!hasAccess) {
+      const granted = access.rows.some(r => interaction.member.roles.cache.has(r.role_id));
+      if (!granted) {
         return interaction.editReply({ content: '❌ Only the Server Owner or configured roles can manage auto-role.', ephemeral: true });
       }
     }
 
-    await showMainPanel(interaction, guildId);
+    await showPanel(interaction, guildId);
   },
 };
 
-async function showMainPanel(interaction, guildId) {
-  // Fetch current config
-  const configResult = await query('SELECT * FROM autorole_config WHERE guild_id = $1', [guildId]);
-  const config = configResult.rows[0] || { enabled: false, join_log_channel: null };
+async function showPanel(interaction, guildId) {
+  const cfgResult = await query('SELECT * FROM autorole_config WHERE guild_id = $1', [guildId]);
+  const cfg = cfgResult.rows[0] || { enabled: false, log_channel: null, last_checked: null };
 
-  const mappingsResult = await query('SELECT * FROM autorole_mappings WHERE guild_id = $1', [guildId]);
-  const mappings = mappingsResult.rows;
+  const mapResult = await query('SELECT * FROM autorole_mappings WHERE guild_id = $1', [guildId]);
+  const mappings = mapResult.rows;
 
   const accessResult = await query('SELECT * FROM autorole_access WHERE guild_id = $1', [guildId]);
   const accessRoles = accessResult.rows;
 
-  const teamRoles = {};
-  const defaultTeams = ['Civilian', 'Police', 'Sheriff', 'State Police', 'Fire/EMS', 'DOT'];
-  for (const t of defaultTeams) teamRoles[t] = 'Not set';
-
-  for (const m of mappings) {
-    teamRoles[m.team_name] = m.role_id ? `<@&${m.role_id}>` : 'Not set';
-  }
-
-  const statusEmoji = config.enabled ? '🟢 Enabled' : '🔴 Disabled';
-  const logChanStr = config.join_log_channel ? `<#${config.join_log_channel}>` : 'Not set';
-
   const embed = new EmbedBuilder()
-    .setTitle('⚙️ ER:LC Auto-Role Management')
-    .setDescription(`Configure team-to-role mappings for automatic role assignment based on ER:LC in-game teams.`)
-    .setColor(config.enabled ? 0x00FF00 : 0xFF0000)
+    .setTitle('⚙️ ER:LC Auto-Role')
+    .setDescription('Team → Discord role mappings for automatic role assignment.')
+    .setColor(cfg.enabled ? 0x00FF00 : 0xFF0000)
     .addFields(
-      { name: 'Status', value: statusEmoji, inline: true },
-      { name: 'Log Channel', value: logChanStr, inline: true },
-      { name: 'Last Checked', value: config.last_checked ? `<t:${Math.floor(new Date(config.last_checked).getTime() / 1000)}:R>` : 'Never', inline: true },
-      { name: '\u200B', value: '\u200B' },
+      { name: 'Status', value: cfg.enabled ? '🟢 Enabled' : '🔴 Disabled', inline: true },
+      { name: 'Log Channel', value: cfg.log_channel ? `<#${cfg.log_channel}>` : 'Not set', inline: true },
+      { name: 'Last Checked', value: cfg.last_checked ? `<t:${Math.floor(new Date(cfg.last_checked).getTime() / 1000)}:R>` : 'Never', inline: true },
     );
 
-  // List each team mapping
-  let mappingText = '';
-  for (const [team, roleStr] of Object.entries(teamRoles)) {
-    const exists = mappings.some(m => m.team_name === team);
-    const emoji = exists ? '✅' : '⬜';
-    mappingText += `${emoji} **${team}** → ${roleStr}\n`;
+  // Team mappings
+  const defaultTeams = ['Civilian', 'Police', 'Sheriff', 'State Police', 'Fire/EMS', 'DOT'];
+  let mapText = '';
+  for (const team of defaultTeams) {
+    const m = mappings.find(x => x.team_name === team);
+    const status = m ? `✅ <@&${m.role_id}>` : '⬜ Not set';
+    mapText += `${status} — **${team}**\n`;
   }
-  embed.addFields({ name: 'Team → Role Mappings', value: mappingText || 'No mappings configured.', inline: false });
+  embed.addFields({ name: 'Team Mappings', value: mapText || 'None', inline: false });
 
   if (accessRoles.length > 0) {
-    const accessStr = accessRoles.map(a => `<@&${a.role_id}>`).join('\n');
-    embed.addFields({ name: 'Roles with Access', value: accessStr, inline: false });
+    const list = accessRoles.map(a => `<@&${a.role_id}>`).join(', ');
+    embed.addFields({ name: 'Roles with Access', value: list, inline: false });
   }
 
-  // Buttons
-  const toggleBtn = new ButtonBuilder()
-    .setCustomId('autorole_toggle')
-    .setLabel(config.enabled ? 'Disable' : 'Enable')
-    .setStyle(config.enabled ? ButtonStyle.Danger : ButtonStyle.Success);
+  // Verification auto-scan info (no /link needed)
+  embed.addFields({
+    name: '🔍 Verification',
+    value: 'Roblox IDs are auto-detected from **Bloxlink** and **Melonly** nickname patterns. No manual `/link` command — just verify with those bots and auto-role will pick it up.',
+    inline: false,
+  });
 
-  const row1 = new ActionRowBuilder().addComponents(toggleBtn);
+  const row1 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('ar_toggle')
+      .setLabel(cfg.enabled ? 'Disable' : 'Enable')
+      .setStyle(cfg.enabled ? ButtonStyle.Danger : ButtonStyle.Success),
+  );
 
-  const row2 = new ActionRowBuilder()
-    .addComponents(
-      new StringSelectMenuBuilder()
-        .setCustomId('autorole_team_select')
-        .setPlaceholder('Select a team to map...')
-        .addOptions(
-          { label: 'Civilian', value: 'Civilian', emoji: '👤' },
-          { label: 'Police', value: 'Police', emoji: '👮' },
-          { label: 'Sheriff', value: 'Sheriff', emoji: '⭐' },
-          { label: 'State Police', value: 'State Police', emoji: '🚔' },
-          { label: 'Fire/EMS', value: 'Fire/EMS', emoji: '🚒' },
-          { label: 'DOT', value: 'DOT', emoji: '🚧' },
-        ),
-    );
+  const row2 = new ActionRowBuilder().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId('ar_team_select')
+      .setPlaceholder('Select team to map...')
+      .addOptions(
+        defaultTeams.map(t => ({ label: t, value: t })),
+      ),
+  );
 
-  const row3 = new ActionRowBuilder()
-    .addComponents(
-      new ButtonBuilder().setCustomId('autorole_set_log').setLabel('Set Log Channel').setStyle(ButtonStyle.Secondary).setEmoji('📝'),
-      new ButtonBuilder().setCustomId('autorole_access').setLabel('Manage Access').setStyle(ButtonStyle.Secondary).setEmoji('🔑'),
-      new ButtonBuilder().setCustomId('autorole_sync_now').setLabel('Sync Now').setStyle(ButtonStyle.Primary).setEmoji('🔄'),
-    );
+  const row3 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('ar_set_log').setLabel('Set Log Channel').setStyle(ButtonStyle.Secondary).setEmoji('📝'),
+    new ButtonBuilder().setCustomId('ar_access').setLabel('Manage Access').setStyle(ButtonStyle.Secondary).setEmoji('🔑'),
+    new ButtonBuilder().setCustomId('ar_sync').setLabel('Sync Now').setStyle(ButtonStyle.Primary).setEmoji('🔄'),
+  );
 
-  msg = await interaction.editReply({ embeds: [embed], components: [row1, row2, row3], fetchReply: true });
+  const msg = await interaction.editReply({ embeds: [embed], components: [row1, row2, row3], fetchReply: true });
 
-  // Collector for modal-like responses
+  // Collector
   const filter = i => i.user.id === interaction.user.id;
   const collector = msg.createMessageComponentCollector({ filter, time: 120000 });
 
   collector.on('collect', async (i) => {
-    if (i.customId === 'autorole_toggle') {
-      const newStatus = !config.enabled;
+    if (i.customId === 'ar_toggle') {
+      const newVal = !cfg.enabled;
       await query(
         `INSERT INTO autorole_config (guild_id, enabled) VALUES ($1, $2)
          ON CONFLICT (guild_id) DO UPDATE SET enabled = $2, updated_at = NOW()`,
-        [guildId, newStatus]
+        [guildId, newVal]
       );
-      config.enabled = newStatus;
-      await i.update({ content: `✅ Auto-role ${newStatus ? 'enabled' : 'disabled'}.`, embeds: [], components: [], ephemeral: true });
-      await showMainPanel(interaction, guildId);
+      cfg.enabled = newVal;
+      await i.update({ content: `✅ Auto-role ${newVal ? 'enabled' : 'disabled'}.`, embeds: [], components: [], ephemeral: true });
+      setTimeout(() => showPanel(interaction, guildId), 500);
     }
 
-    else if (i.customId === 'autorole_team_select') {
+    else if (i.customId === 'ar_team_select') {
       const team = i.values[0];
-      // Ask for role via modal
       const { ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder: ModalRow } = require('discord.js');
       const modal = new ModalBuilder()
-        .setCustomId(`autorole_role_modal_${team}`)
-        .setTitle(`Set Role for ${team}`);
-
-      const roleInput = new TextInputBuilder()
-        .setCustomId('role_id')
-        .setLabel('Enter Role ID or mention')
-        .setStyle(TextInputStyle.Short)
-        .setPlaceholder('e.g. 123456789012345678')
-        .setRequired(true);
-
-      modal.addComponents(new ModalRow().addComponents(roleInput));
+        .setCustomId(`ar_role_${team}`)
+        .setTitle(`Role for ${team}`);
+      modal.addComponents(
+        new ModalRow().addComponents(
+          new TextInputBuilder()
+            .setCustomId('role_id')
+            .setLabel('Enter Role ID')
+            .setStyle(TextInputStyle.Short)
+            .setPlaceholder('Paste the role ID')
+            .setRequired(true),
+        ),
+      );
       await i.showModal(modal);
     }
 
-    else if (i.customId === 'autorole_set_log') {
+    else if (i.customId === 'ar_set_log') {
+      const { ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder: ModalRow } = require('discord.js');
       const modal = new ModalBuilder()
-        .setCustomId('autorole_log_modal')
-        .setTitle('Set Log Channel');
-
-      const chanInput = new TextInputBuilder()
-        .setCustomId('channel_id')
-        .setLabel('Enter Channel ID')
-        .setStyle(TextInputStyle.Short)
-        .setPlaceholder('Channel ID for logs')
-        .setRequired(false);
-
-      modal.addComponents(new ActionRowBuilder().addComponents(chanInput));
+        .setCustomId('ar_log_modal')
+        .setTitle('Log Channel');
+      modal.addComponents(
+        new ModalRow().addComponents(
+          new TextInputBuilder()
+            .setCustomId('channel_id')
+            .setLabel('Channel ID (leave blank to clear)')
+            .setStyle(TextInputStyle.Short)
+            .setPlaceholder('Channel ID')
+            .setRequired(false),
+        ),
+      );
       await i.showModal(modal);
     }
 
-    else if (i.customId === 'autorole_access') {
-      // Show access management sub-panel
+    else if (i.customId === 'ar_access') {
       await showAccessPanel(i, guildId);
     }
 
-    else if (i.customId === 'autorole_sync_now') {
-      await i.update({ content: '🔄 Syncing roles now...', embeds: [], components: [], ephemeral: true });
+    else if (i.customId === 'ar_sync') {
+      await i.update({ content: '🔄 Syncing...', embeds: [], components: [], ephemeral: true });
       const AutoRoleService = require('../modules/autorole/AutoRoleService');
       const svc = new AutoRoleService(interaction.client);
-      await svc.syncGuild({ guild_id: guildId, enabled: true, join_log_channel: config.join_log_channel });
-      await interaction.editReply({ content: '✅ Sync complete!', ephemeral: true });
-      setTimeout(() => showMainPanel(interaction, guildId), 1000);
+      await svc.syncGuild({ guild_id: guildId, enabled: true, log_channel: cfg.log_channel });
+      await interaction.editReply({ content: '✅ Sync done. Roles updated for verified members.', ephemeral: true });
+      setTimeout(() => showPanel(interaction, guildId), 1000);
     }
   });
-
-  // Handle modal submissions
-  const modalFilter = i => i.user.id === interaction.user.id && i.isModalSubmit();
-  const modalCollector = interaction.channel.createMessageComponentCollector({ modalFilter, time: 120000 });
-
-  // Actually we need to listen on the interaction for modal submit
-  // The modal submit will come through interactionCreate, not the message components
 }
 
 async function showAccessPanel(interaction, guildId) {
   const accessResult = await query('SELECT * FROM autorole_access WHERE guild_id = $1', [guildId]);
-  const currentRoles = accessResult.rows;
+  const current = accessResult.rows;
 
   const embed = new EmbedBuilder()
     .setTitle('🔑 Access Management')
-    .setDescription('Select which Discord roles can manage the auto-role system.\nOnly selected roles + Server Owner have access.')
-    .setColor(0x5865F2);
+    .setDescription('Choose which Discord roles can access the `/autorole` panel.\nOnly selected roles + Server Owner.')
+    .setColor(0x5865F2)
+    .addFields({ name: 'Authorized Roles', value: current.map(r => `<@&${r.role_id}>`).join('\n') || 'None (Owner only)' });
 
-  if (currentRoles.length > 0) {
-    embed.addFields({ name: 'Authorized Roles', value: currentRoles.map(r => `<@&${r.role_id}>`).join('\n') || 'None' });
-  } else {
-    embed.addFields({ name: 'Authorized Roles', value: 'None (only Server Owner)' });
-  }
-
-  const roleOptions = interaction.guild.roles.cache
+  const roleOpts = interaction.guild.roles.cache
     .filter(r => r.id !== interaction.guild.id && !r.managed)
-    .map(r => ({ label: r.name, value: r.id }))
-    .slice(0, 25);
+    .map(r => ({ label: r.name, value: r.id }));
 
-  const row1 = new ActionRowBuilder()
-    .addComponents(
-      new StringSelectMenuBuilder()
-        .setCustomId('autorole_add_access_role')
-        .setPlaceholder('Add a role...')
-        .addOptions(roleOptions.length > 0 ? roleOptions : [{ label: 'No roles available', value: 'none' }]),
-    );
+  const addMenu = new ActionRowBuilder().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId('ar_add_access')
+      .setPlaceholder('Add a role...')
+      .addOptions(roleOpts.slice(0, 25).length > 0 ? roleOpts.slice(0, 25) : [{ label: 'No roles', value: 'none' }]),
+  );
 
-  const row2 = new ActionRowBuilder()
-    .addComponents(
-      new StringSelectMenuBuilder()
-        .setCustomId('autorole_remove_access_role')
-        .setPlaceholder('Remove a role...')
-        .addOptions(currentRoles.length > 0
-          ? currentRoles.map(r => {
-              const role = interaction.guild.roles.cache.get(r.role_id);
-              return { label: role?.name || 'Unknown', value: r.role_id };
-            })
-          : [{ label: 'No roles to remove', value: 'none' }]
-        ),
-    );
+  const removeOpts = current.map(r => {
+    const role = interaction.guild.roles.cache.get(r.role_id);
+    return { label: role?.name || 'Unknown', value: r.role_id };
+  });
+  const removeMenu = new ActionRowBuilder().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId('ar_remove_access')
+      .setPlaceholder('Remove a role...')
+      .addOptions(removeOpts.length > 0 ? removeOpts : [{ label: 'No roles', value: 'none' }]),
+  );
 
-  const backBtn = new ActionRowBuilder()
-    .addComponents(
-      new ButtonBuilder().setCustomId('autorole_back').setLabel('← Back').setStyle(ButtonStyle.Secondary),
-    );
+  const back = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('ar_back').setLabel('← Back').setStyle(ButtonStyle.Secondary),
+  );
 
-  await interaction.update({ embeds: [embed], components: [row1, row2, backBtn] });
+  await interaction.update({ embeds: [embed], components: [addMenu, removeMenu, back] });
 }
 
-// Handle modal submits globally via interactionCreate
+// Handle modals and access sub-menu actions
 module.exports.handleModal = async (interaction) => {
-  const customId = interaction.customId;
   const guildId = interaction.guild.id;
+  const cid = interaction.customId;
 
-  if (customId.startsWith('autorole_role_modal_')) {
-    const team = customId.replace('autorole_role_modal_', '');
+  if (cid.startsWith('ar_role_')) {
+    const team = cid.replace('ar_role_', '');
     const roleId = interaction.fields.getTextInputValue('role_id').replace(/[<@&>]/g, '');
-
     if (!/^\d{17,20}$/.test(roleId)) {
-      return interaction.reply({ content: '❌ Invalid role ID. Please enter a valid role ID.', ephemeral: true });
+      return interaction.reply({ content: '❌ Invalid role ID.', ephemeral: true });
     }
-
     await query(
       `INSERT INTO autorole_mappings (guild_id, team_name, role_id) VALUES ($1, $2, $3)
        ON CONFLICT (guild_id, team_name) DO UPDATE SET role_id = $3`,
       [guildId, team, roleId]
     );
-
-    await interaction.reply({ content: `✅ **${team}** → <@&${roleId}> saved!`, ephemeral: true });
+    await interaction.reply({ content: `✅ **${team}** → <@&${roleId}>`, ephemeral: true });
   }
 
-  else if (customId === 'autorole_log_modal') {
-    const channelId = interaction.fields.getTextInputValue('channel_id').replace(/[<#>]/g, '');
+  else if (cid === 'ar_log_modal') {
+    const ch = interaction.fields.getTextInputValue('channel_id').replace(/[<#>]/g, '');
     await query(
-      `INSERT INTO autorole_config (guild_id, join_log_channel) VALUES ($1, $2)
-       ON CONFLICT (guild_id) DO UPDATE SET join_log_channel = $2, updated_at = NOW()`,
-      [guildId, channelId || null]
+      `INSERT INTO autorole_config (guild_id, log_channel) VALUES ($1, $2)
+       ON CONFLICT (guild_id) DO UPDATE SET log_channel = $2, updated_at = NOW()`,
+      [guildId, ch || null]
     );
-    await interaction.reply({ content: channelId ? `✅ Log channel set to <#${channelId}>` : '✅ Log channel cleared.', ephemeral: true });
+    await interaction.reply({ content: ch ? `✅ Log channel set.` : '✅ Log channel cleared.', ephemeral: true });
+  }
+
+  else if (cid === 'ar_add_access') {
+    const roleId = interaction.values?.[0];
+    if (roleId && roleId !== 'none') {
+      await query(
+        `INSERT INTO autorole_access (guild_id, role_id, permission) VALUES ($1, $2, 'manage')
+         ON CONFLICT DO NOTHING`,
+        [guildId, roleId]
+      );
+      await interaction.reply({ content: `✅ <@&${roleId}> can now manage auto-role.`, ephemeral: true });
+    }
+  }
+
+  else if (cid === 'ar_remove_access') {
+    const roleId = interaction.values?.[0];
+    if (roleId && roleId !== 'none') {
+      await query(
+        'DELETE FROM autorole_access WHERE guild_id = $1 AND role_id = $2',
+        [guildId, roleId]
+      );
+      await interaction.reply({ content: `✅ Role removed from access list.`, ephemeral: true });
+    }
   }
 };
